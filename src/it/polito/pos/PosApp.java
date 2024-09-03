@@ -205,7 +205,7 @@ public class PosApp{
      */
     public String performPayment(String pin) throws PosException {
         IssuerClass issuer=card.getIssuer();
-        if(card.getCardPin().contains(pin)){
+        if(card.getCardPin().equals(pin)){
             issuer.validatePurchase(card.getCardNumber(), pin, 0);
             status=Status.SUCCESS; 
         }
