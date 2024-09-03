@@ -1,11 +1,20 @@
 package it.polito.pos;
 
 import java.time.LocalDate;
+import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 public class PosApp{
-
+    List<String> lines=new LinkedList<>();
+    HashMap<String,IssuerClass> issuers=new HashMap<>();
+    LocalDate currenDate=LocalDate.now();
+    Status status=Status.IDLE;
+    TreeMap<LocalDate,Payment> payments=new TreeMap<>();
+    TreeMap<String,Card> cards=new TreeMap<>();
+    Card card;
     /**
      * Define the current status of the POS
      */
@@ -36,6 +45,13 @@ public class PosApp{
      * @throws PosException if lines are null or longer that 20 chars
      */
     public void setMerchantInfo(String line1, String line2, String line3) throws PosException {
+        if((line1.length()>20 )|| (line2.length()>20) || (line3.length()>20)){
+            throw new PosException("lines lenght not valid");
+        }
+        lines.add(line1);
+        lines.add(line2);
+        lines.add(line3);
+
         // ..
     }
 
@@ -45,6 +61,9 @@ public class PosApp{
      * @return the merchant info
      */
     public String getMerchantInfo(){
+        for(String s:lines){
+            System.out.println(s);
+        }
         return null;
     }
 
@@ -58,6 +77,14 @@ public class PosApp{
      * @param iins   the Issuer Identification Numbers
      */
     public void registerIssuer(String name, Issuer server, String... iins){
+        List<String> idNumbers=new LinkedList<>();
+        for(String s:iins){
+            idNumbers.add(s);
+        }
+        IssuerClass issuer=new IssuerClass(name, idNumbers);
+        issuers.put(name, issuer);
+        
+
         // ..
     }
 
@@ -72,7 +99,10 @@ public class PosApp{
      * @throws PosException if no issuer IIN match the card number
      */
     public String getIssuer(String cardNumber) throws PosException {
-        return null;
+        if(issuers.values().stream().filter(c->c.controlNum(cardNumber)).map(IssuerClass:: getName).toString() == null){
+            throw new PosException("invalid");
+        }
+        return issuers.values().stream().filter(c->c.controlNum(cardNumber)).map(IssuerClass:: getName).toString();
     }
 
     /**
@@ -82,7 +112,7 @@ public class PosApp{
      * @return current date
      */
     public LocalDate currentDate(){
-        return null;
+        return currenDate;
     }
 
     /**
@@ -91,6 +121,8 @@ public class PosApp{
      * @param today the new current date
      */
     public void setCurrentDate(LocalDate today){
+        currenDate=today;
+
         // changes the current date
     }
     // R2 - Basic transaction
@@ -101,7 +133,7 @@ public class PosApp{
      * @return current status
      */
     public Status getStatus(){
-        return null;
+        return status;
     }
 
     /**
@@ -113,6 +145,16 @@ public class PosApp{
      * @throws PosException in case the current status is not IDLE
      */
     public void beginPayment(double amount) throws PosException {
+        if(status != Status.IDLE){
+            
+            throw new PosException("not valid status");
+           
+        }
+        else{
+            status=Status.STARTED;
+            Payment payment=new Payment(currenDate, amount);
+            payments.put(currenDate, payment);
+        }
         // store the payment amount to begin a transaction
     }
 
@@ -128,7 +170,20 @@ public class PosApp{
      * @throws PosException if the current state is not STARTED or the card data is not correct or card is expired
      */
     public void readStripe(String cardNumber, String client, String expiration) throws PosException {
-        // accepts the data read when the card is swiped throgh the reader
+        if (status != Status.STARTED) {
+            status=Status.DECLINED;
+            throw new PosException("not valid status");
+
+        }
+        if(getIssuer(cardNumber) ==null){
+            status=Status.DECLINED;
+            throw new PosException("not valid credit card");
+        }
+        Card card1=new Card(cardNumber, client, expiration);
+        cards.put(client, card1);
+        card =card1;
+        status=Status.READ;
+        
     }
 
     /**
@@ -149,7 +204,15 @@ public class PosApp{
      * @throws PosException in case of error
      */
     public String performPayment(String pin) throws PosException {
-        // accepts the pin and start the transaction with issuer server
+        IssuerClass issuer=card.getIssuer();
+        if(card.getCardPin().contains(pin)){
+            issuer.validatePurchase(card.getCardNumber(), pin, 0);
+            status=Status.SUCCESS; 
+        }
+        else{
+            status=Status.DECLINED;
+            throw new PosException("undefined pin");
+        }
         return null;
     }
 
