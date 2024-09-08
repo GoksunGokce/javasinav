@@ -1,20 +1,36 @@
 package it.polito.pos;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
+import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
+
 public class PosApp{
     List<String> lines=new LinkedList<>();
     HashMap<String,IssuerClass> issuers=new HashMap<>();
+    HashMap<String,Issuer> issuerMap=new HashMap<>();
+    private Map<String,String> numbertocardtoprovider=new HashMap<>();
     LocalDate currenDate=LocalDate.now();
     Status status=Status.IDLE;
     TreeMap<LocalDate,Payment> payments=new TreeMap<>();
     TreeMap<String,Card> cards=new TreeMap<>();
+    private Map<String, List<String>> issuersTxMap = new HashMap<>();
+    private Map<String, Double> issuerTotalMap = new HashMap<>();
     Card card;
+    Double amount;
+    int wrong_pins=0;
+    String currentTr;
+    String currentIssuer;
+    String currentCardNumber;
+    
+
     /**
      * Define the current status of the POS
      */
@@ -45,6 +61,9 @@ public class PosApp{
      * @throws PosException if lines are null or longer that 20 chars
      */
     public void setMerchantInfo(String line1, String line2, String line3) throws PosException {
+        if (line1 == null || line2 == null || line3 == null) {
+            throw new PosException("lines cannot be null");
+        }
         if((line1.length()>20 )|| (line2.length()>20) || (line3.length()>20)){
             throw new PosException("lines lenght not valid");
         }
@@ -64,7 +83,7 @@ public class PosApp{
         for(String s:lines){
             System.out.println(s);
         }
-        return null;
+        return String.join("\n", lines);
     }
 
     /**
@@ -80,9 +99,17 @@ public class PosApp{
         List<String> idNumbers=new LinkedList<>();
         for(String s:iins){
             idNumbers.add(s);
+            this.numbertocardtoprovider.put(s, name);
         }
+        issuerTotalMap.put(name, 0.0);
+        issuersTxMap.put(name, new ArrayList<>());
+
         IssuerClass issuer=new IssuerClass(name, idNumbers);
         issuers.put(name, issuer);
+        issuerMap.put(name, server);
+        
+
+
         
 
         // ..
@@ -99,10 +126,13 @@ public class PosApp{
      * @throws PosException if no issuer IIN match the card number
      */
     public String getIssuer(String cardNumber) throws PosException {
+
+        
         if(issuers.values().stream().filter(c->c.controlNum(cardNumber)).map(IssuerClass:: getName).toString() == null){
             throw new PosException("invalid");
         }
-        return issuers.values().stream().filter(c->c.controlNum(cardNumber)).map(IssuerClass:: getName).toString();
+        return issuers.values().stream().filter(c->c.controlNum(cardNumber)).map(IssuerClass:: getName).findFirst().orElseThrow(()-> new PosException("invalid"));
+        
     }
 
     /**
@@ -154,6 +184,8 @@ public class PosApp{
             status=Status.STARTED;
             Payment payment=new Payment(currenDate, amount);
             payments.put(currenDate, payment);
+            this.amount=amount;
+
         }
         // store the payment amount to begin a transaction
     }
@@ -170,19 +202,75 @@ public class PosApp{
      * @throws PosException if the current state is not STARTED or the card data is not correct or card is expired
      */
     public void readStripe(String cardNumber, String client, String expiration) throws PosException {
-        if (status != Status.STARTED) {
+        if (this.status == Status.DECLINED || this.status == Status.STARTED) {
+            try {
+                String issuerName = this.getIssuer(cardNumber);
+
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("MMyy");
+                YearMonth cardExpiryDate = YearMonth.parse(expiration, formatter);
+                LocalDate cardExpiryLocalDate = cardExpiryDate.atEndOfMonth();
+
+                if (this.currentDate().isBefore(cardExpiryLocalDate)) {
+                    int sum = 0;
+                    boolean second = false;
+
+                    for (int i = cardNumber.length() - 1; i >= 0; i--) {
+                        // Get each character and convert it to a digit
+                        char digitChar = cardNumber.charAt(i);
+                        int digit = Character.getNumericValue(digitChar);  // Convert char to int
+
+                        if (second) {
+                            if (digit * 2 >= 10) {
+                                sum += ((digit * 2) / 10) + ((digit * 2) % 10);
+                            } else {
+                                sum += digit * 2;
+                            }
+                            second = false;
+                        } else {
+                            sum += digit;
+                            second = true;
+                        }
+                    }
+
+                    if (sum % 10 == 0) {
+                        this.status = Status.READ;
+                        this.currentIssuer = issuerName;
+                        this.currentCardNumber = cardNumber;
+                    } else {
+                        this.status = Status.DECLINED;
+                        throw new PosException("Card not valid, invalid parity digit");
+                    }
+                    
+                } else {
+                    this.status = Status.DECLINED;
+                    throw new PosException("readStripe: Card has expired");
+                }
+            } catch (PosException e) {
+                this.status = Status.DECLINED;
+                throw e;
+            }
+            
+        } else {
+            throw new PosException("readStripe: POS status not STARTED or DECLINED");
+        
+    }
+       /* if (status != Status.STARTED) {
             status=Status.DECLINED;
             throw new PosException("not valid status");
 
         }
-        if(getIssuer(cardNumber) ==null){
+        try{
+            getIssuer(cardNumber);
+        }catch(PosException e){
             status=Status.DECLINED;
             throw new PosException("not valid credit card");
         }
         Card card1=new Card(cardNumber, client, expiration);
-        cards.put(client, card1);
+        cards.put(cardNumber, card1);
         card =card1;
+
         status=Status.READ;
+        */
         
     }
 
@@ -204,16 +292,37 @@ public class PosApp{
      * @throws PosException in case of error
      */
     public String performPayment(String pin) throws PosException {
-        IssuerClass issuer=card.getIssuer();
-        if(card.getCardPin().equals(pin)){
-            issuer.validatePurchase(card.getCardNumber(), pin, 0);
-            status=Status.SUCCESS; 
+        
+        if (status == Status.READ || (status == Status.WRONG_PIN)) {
+
+            Issuer issuer = this.issuerMap.get(this.currentIssuer);
+            TransactionResult result = issuer.validatePurchase(this.currentCardNumber, pin, this.amount);
+            if (result.getResultCode() == TransactionResult.OK) {
+                this.status = Status.SUCCESS;
+                double total = this.issuerTotalMap.get(this.currentIssuer);
+                this.issuerTotalMap.put(this.currentIssuer, total + this.amount);
+                this.issuersTxMap.get(this.currentIssuer).add(result.getId());
+                this.currentTr = result.getId();
+                return result.getId();
+            } else if (result.getResultCode() == TransactionResult.WRONG_PIN) {
+                if (this.wrong_pins < 2) {
+                    this.wrong_pins += 1;
+                    this.status = Status.WRONG_PIN;
+                    throw new PosException("performPayment: Wrong pin entered");
+                } else {
+                    this.wrong_pins = 0;
+                    this.status = Status.DECLINED;
+                    throw new PosException("performPayment: 3 consecutive wrong pins");
+                }
+            } else {
+                this.status = Status.DECLINED;
+                throw new PosException("performPayment: transacton refused by server");
+            }
+        } else {
+            throw new PosException("performPayment: POS state not READ or WRONG_PIN");
         }
-        else{
-            status=Status.DECLINED;
-            throw new PosException("undefined pin");
-        }
-        return null;
+        
+        
     }
 
 
@@ -224,7 +333,13 @@ public class PosApp{
      * From status SUCCESS moves into IDLE
      */
     public void reset() throws PosException {
-        // goes to IDLE state again
+        if (status== Status.SUCCESS) {
+            this.status = Status.IDLE;
+            this.amount = 0.0;
+            this.wrong_pins = 0;
+        } else {
+            throw new PosException("reset: POS status not SUCCESS");
+        }
     }
 
     /**
@@ -236,8 +351,24 @@ public class PosApp{
      * @throws PosException if not in SUCCESS state or in case of error from the server
      */
     public String cancelTransaction() throws PosException {
-        // cancel the latest transaction if successful
-        return null;
+        if (status == Status.SUCCESS) {
+            Issuer issuer = this.issuerMap.get(this.currentIssuer);
+            TransactionResult result = issuer.cancelPurchase(this.currentTr, amount);
+            if (result.getResultCode() == TransactionResult.OK) {
+                this.status = Status.IDLE;
+                Double total = this.issuerTotalMap.get(this.currentIssuer);
+                this.issuerTotalMap.put(this.currentIssuer, total - this.amount);
+                this.issuersTxMap.get(this.currentIssuer).remove(this.currentTr);
+                this.amount = 0.0;
+                this.wrong_pins = 0;
+                return result.getId();
+            } else {
+                throw new PosException("cancelTransaction: Server denied cancelling the transaction with id: " + this.currentTr);
+            }
+        } else {
+            throw new PosException("cancelTransaction: POS status not SUCCESS");
+        }
+    
     }
 
     /**
@@ -246,6 +377,13 @@ public class PosApp{
      * moved back to IDLE
      */
     public void abortPayment() throws PosException {
+        if (status == Status.WRONG_PIN || status == Status.DECLINED) {
+            this.status = Status.IDLE;
+            this.amount = 0.0;
+            this.wrong_pins = 0;
+        } else {
+            throw new PosException("abortPayment: POS not in status WRONG_PIN or DECLINED");
+        }
         // in case of failed payment 
     }
 
@@ -269,7 +407,19 @@ public class PosApp{
      * @return the string of the receipt
      */
     public String receipt(){
-        return null;
+        String res = "";
+        res += this.getMerchantInfo() + "\n";
+        res += this.currenDate + "\n";
+        res += this.currentCardNumber.substring(this.currentCardNumber.length() - 4) + "\n";
+        res += this.amount+ "\n";
+        if (this.status == Status.SUCCESS || this.status == Status.IDLE) {
+            res += "OK\n";
+            res += this.currentTr + "\n";
+        } else {
+            res += "ERROR" + "\n";
+        }
+        return res;
+        
     }
 
     /**
@@ -279,7 +429,7 @@ public class PosApp{
      * @return the map issuer - transaction list
      */
     public Map<String,List<String>> transactionsByIssuer(){
-        return null;
+        return this.issuersTxMap;
     }
 
     /**
@@ -289,7 +439,7 @@ public class PosApp{
      * @return the map issuer - transaction list
      */
     public Map<String,Double> totalByIssuer(){
-        return null;
+        return this.issuerTotalMap;
     }
 
 }
